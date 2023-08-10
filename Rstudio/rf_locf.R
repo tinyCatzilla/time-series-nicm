@@ -8,8 +8,8 @@ library(pROC)
 options(scipen = 25, digits = 4)
 
 # Load data
-labels <- fread("nicm/labels_sani.csv")
-dx <- fread("nicm/nicm_combined.csv")
+labels <- fread("nicm/labels_processed.csv")
+dx <- fread("nicm/dx_processed.csv")
 test <- fread("nicm/data_test.csv")
 
 # Merge data based on patient id
@@ -89,7 +89,7 @@ for (outcome in outcomes) {
   # # Print model summary
   # print(paste("Model Summary for", outcome, ":"))
   # print(rf_models[[outcome]])
-  # 
+  
   # Print model imbalanced performance
   performance = get.imbalanced.performance(rf_models[[outcome]])
   print(paste("Imbalanced Performance of Model for", outcome, ":"))

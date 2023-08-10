@@ -1,0 +1,29 @@
+#!/bin/bash
+#SBATCH --job-name=nicm_nolocf
+#SBATCH -p defq
+#SBATCH --nodelist=vh-J9HVI-AIML3
+#SBATCH --nodes=1
+#SBATCH --gres=gpu:v100:1
+#SBATCH -o /data/aiiih/projects/ts_nicm/zOut/nolocf/%x.out
+#SBATCH -e /data/aiiih/projects/ts_nicm/zOut/nolocf/%x.err
+
+# Load application environment
+module load cuda11.7/toolkit/11.7.1
+module load python39
+module load R
+
+# Run application commands
+. /data/aiiih/envs/kish/bin/activate
+Rscript --vanilla ../prep/prep_data_no_locf.R
+python3 ../models/no_locf.py
+Rscript --vanilla ../utils/latex.R
+Rscript --vanilla ../utils/median.R
+
+
+# If the target directory exists, remove it
+if [ -d "../results/last_no_locf" ]; then
+    rm -r ../results/last_no_locf
+fi
+
+# Rename results directory
+mv ../results/base ../results/last_no_locf

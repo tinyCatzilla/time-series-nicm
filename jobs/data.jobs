@@ -1,0 +1,16 @@
+#!/bin/bash
+#SBATCH --job-name=nicm_data
+#SBATCH -p defq
+#SBATCH --nodelist=vh-J9HVI-AIML3
+#SBATCH --nodes=1
+#SBATCH -o /data/aiiih/projects/ts_nicm/zOut/data/%x.out
+#SBATCH -e /data/aiiih/projects/ts_nicm/zOut/data/%x.err
+
+# Load application environment
+module load cuda11.7/toolkit/11.7.1
+module load python39
+module load R
+
+# Run application commands
+. /data/aiiih/envs/kish/bin/activate
+Rscript --vanilla ../utils/describe_data.R

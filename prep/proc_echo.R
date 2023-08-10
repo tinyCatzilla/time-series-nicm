@@ -64,8 +64,17 @@ common_dt <- merged_common[, .(pid = K_PAT_KEY, echo_dt = Event_Stop_Date)]
 # Cast 'pid' to character
 common_dt[, pid := as.character(pid)]
 
+# Directory path
+dir_path <- "/data/aiiih/projects/ts_nicm/data/echo/"
+
+# Create the directory if it doesn't exist
+if (!dir.exists(dir_path)) {
+  dir.create(dir_path, recursive = TRUE)
+}
+
 # Write the 'K_PAT_KEY' values and most recent 'Event_Stop_Date' to a CSV file
-fwrite(common_dt, "/data/aiiih/projects/ts_nicm/data/common_ids.csv", row.names = FALSE)
+fwrite(common_dt, file.path(dir_path, "common_ids.csv"), row.names = FALSE)
+
 
 # Print the number of common IDs
 cat("Number of common IDs after processing: ", format(length(common), big.mark = ","), "\n")

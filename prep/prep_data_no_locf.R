@@ -27,9 +27,8 @@ data_thresh <- 0.01 # threshold if variable only appears <% of patients
 flag_MakeTimeInt <- TRUE #flag to make time intervals. code throws errors without this.
 flag_MakeConsistTime <- TRUE #flag to make consistent time intervals
 flag_MakeNA <- FALSE #flag to make missingness indicators
-# flag_MakeInt <- TRUE #flag to make interval between tests
 flag_rmrare <- TRUE
-flag_LOCF <- TRUE #flag to perform LOCF (last observation carried forward)
+flag_LOCF <- FALSE #flag to perform LOCF (last observation carried forward)
 flag_echo <- FALSE #flag to use echo as a second index event
 save_img <- "/data/aiiih/projects/ts_nicm/data/tmp.RData"
 save_path <- "/data/aiiih/projects/ts_nicm/data"
@@ -60,10 +59,43 @@ labs[,var_dt:=as.Date(var_dt)]
 labs <- labs[,c('pid','var_dt','var','val'),with=F]
 
 #load echo
-echo <- fread("/data/aiiih/projects/ts_nicm/data/common_ids.csv",na.strings=c("","NA","Unknown","UNKNOWN"))
-echo[,var_dt:=as.Date(echo_dt)]
-echo <- echo[,c('pid','echo_dt'),with=F]
-print(paste0("Finished Reading Data at ",format(Sys.time(), "%H:%M")))
+if (flag_echo){
+  echo <- fread("/data/aiiih/projects/ts_nicm/data/echo/common_ids.csv",na.strings=c("","NA","Unknown","UNKNOWN"))
+  echo[,var_dt:=as.Date(echo_dt)]
+  echo <- echo[,c('pid','echo_dt'),with=F]
+  print(paste0("Finished Reading Data at ",format(Sys.time(), "%H:%M")))
+}
+
+
+############################### set save path ##################################
+if (!flag_LOCF){
+  save_path <- paste0(save_path,"/no_locf")
+
+  # Create the directory if it doesn't exist
+  if (!dir.exists(save_path)) {
+    dir.create(save_path, recursive = TRUE)
+  }
+
+  save_img <- paste0(save_path,"/tmp.RData")
+} else if (flag_echo) {
+  save_path <- paste0(save_path,"/echo")
+  
+  # Create the directory if it doesn't exist
+  if (!dir.exists(save_path)) {
+    dir.create(save_path, recursive = TRUE)
+  }
+
+  save_img <- paste0(save_path,"/tmp.RData")
+} else {
+  save_path <- paste0(save_path,"/cmr")
+
+  # Create the directory if it doesn't exist
+  if (!dir.exists(save_path)) {
+    dir.create(save_path, recursive = TRUE)
+  }
+
+  save_img <- paste0(save_path,"/tmp.RData")
+}
   
 ############################### preprocess data ################################
 if (flag_useLabs){
@@ -115,7 +147,7 @@ dx[, var_dt := as.Date(var_dt)]
 dx[, pid := as.character(pid)]
 labels[, pid := as.character(pid)]
 
-if flag_echo{
+if (flag_echo) {
   echo[, pid := as.character(pid)]
 }
 
@@ -136,7 +168,7 @@ var_data <- var_data[pid %in% labels[,pid]]
 # Take the most recent MRI date for each patient
 labels <- labels[, .SD[which.max(mri_dt)], by = pid]
 
-if flag_echo{
+if (flag_echo) {
   # Take the most recent echo date for each patient
   echo <- echo[, .SD[which.max(echo_dt)], by = pid]
   # Merge labels with echo data on pid and keep both mri_dt and echo_dt
@@ -156,7 +188,14 @@ if flag_echo{
 # Merge labels and var_data
 dt1 <- merge(labels, var_data, by = 'pid')
 
-if flag_echo{
+if (flag_echo) {
+  # replace mri_dt with echo_dt in labels
+  labels[, mri_dt := echo_dt]
+  # drop echo_dt
+  labels[, echo_dt := NULL]
+  # rename mri_dt to echo_dt
+  names(labels)[names(labels) == 'mri_dt'] <- 'echo_dt'
+
   # Drop mri_dt
   dt1[, mri_dt := NULL]
 
@@ -166,8 +205,7 @@ if flag_echo{
   rm(echo)
 }
 
-fwrite(labels, file.path(save_path, "labels_sani.csv"))
-# fwrite(dx, file.path(save_path, "dx_sani.csv"))
+fwrite(labels, file.path(save_path, "labels_processed.csv"))
 
 rm(labels, dx, labs, procs, var_data)
 
@@ -246,7 +284,6 @@ if (flag_MakeNA) {
 if (flag_LOCF) {
   # for any NA values, fill with 0
   dt1w[is.na(dt1w)] <- 0
-  fwrite(dt1w, file.path(save_path, "check.csv"))
   for (kVar in var_names) {
     dt1w[, (kVar) := {
       locf_vector <- get(kVar)
@@ -275,6 +312,6 @@ if (flag_normalize & flag_useLabs) {
 
 
 ######################## save file #########################
-fwrite(dt1w, file.path(save_path, "nicm_combined.csv"))
+fwrite(dt1w, file.path(save_path, "dx_processed.csv"))
 save.image(file=save_img)
 print(paste0("Finished running prep_data.R at ",format(Sys.time(), "%H:%M")))

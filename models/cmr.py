@@ -19,13 +19,9 @@ from tsai.analysis import feature_importance
 from tsai.learner import ts_learner
 
 from sklearn.model_selection import train_test_split
-from sklearn.datasets import make_classification
-from sklearn.calibration import CalibratedClassifierCV, calibration_curve
-from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.linear_model import LogisticRegression
+from sklearn.calibration import calibration_curve
 from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import roc_curve, recall_score
-from scipy.special import expit  # sigmoid function
 
 import torch
 import torch.nn as nn
@@ -38,9 +34,6 @@ import matplotlib.pyplot as plt
 import os, math, csv
 
 
-from imblearn.over_sampling import RandomOverSampler
-
-
 
 ################################## VARIABLES ###################################
 
@@ -48,9 +41,9 @@ from imblearn.over_sampling import RandomOverSampler
 trainFrac = 0.70  # fraction of data to use for training
 valFrac = 0.15  # fraction of data to use for validation
 testFrac = 0.15  # fraction of data to use for testing
-input_filepath = "/data/aiiih/projects/ts_nicm/data/nicm_combined.csv"
-label_filepath = "/data/aiiih/projects/ts_nicm/data/labels_sani.csv"
-data_dir = "/data/aiiih/projects/ts_nicm/data"
+input_filepath = "/data/aiiih/projects/ts_nicm/data/cmr/dx_processed.csv"
+label_filepath = "/data/aiiih/projects/ts_nicm/data/cmr/labels_processed.csv"
+data_dir = "/data/aiiih/projects/ts_nicm/data/cmr"
 patient_id_col = 'pid'
 
 
@@ -63,8 +56,11 @@ n_classes = 7
 max_epochs = 45
 verbose = False
 # metrics can be changed in ### METRICS ### section
-# loss_func can be changed in ### LOSS ### section
+weighted_loss = False # flag to use weighted loss
 classes_to_fit = [0,1,2,3,4,5,6] # with isotonic regression, starting w 0
+
+# Evaluation
+flag_useTest = True # flag to use test set for evaluation, instead of validation set
 
 # Output
 output_dir = "/data/aiiih/projects/ts_nicm/results/base"
@@ -84,16 +80,11 @@ class_names = df_labels.columns.tolist()
 index_to_classname = {i-2: classname for i, classname in enumerate(class_names)}
 print(index_to_classname)
 
-
-# Get unique patient IDs
-patient_ids = df[patient_id_col].unique()
-
-# Assert that they add up to 1
-assert trainFrac + valFrac + testFrac == 1, "Fractions do not add up to 1!"
-
-# Create train/validation/test split
-train_pids, temp_pids = train_test_split(patient_ids, test_size=1-trainFrac, random_state=400)
-val_pids, test_pids = train_test_split(temp_pids, test_size=testFrac/(valFrac + testFrac), random_state=400)
+# Read the saved unique patient IDs
+load_dir = "/data/aiiih/projects/ts_nicm/data/split/"
+train_pids = pd.read_csv(os.path.join(load_dir, "train_pids.csv"))[patient_id_col].values
+val_pids = pd.read_csv(os.path.join(load_dir, "val_pids.csv"))[patient_id_col].values
+test_pids = pd.read_csv(os.path.join(load_dir, "test_pids.csv"))[patient_id_col].values
 
 # Split the dataframe into training, validation, and testing according to the pids
 train_df = df[df[patient_id_col].isin(train_pids)]
@@ -106,12 +97,16 @@ val_df.to_csv(os.path.join(data_dir, "data_val.csv"), index=False)
 test_df.to_csv(os.path.join(data_dir, "data_test.csv"), index=False)
 print("Train, validation, and test datasets saved")
 
-# Split the dataframe into training and validation according to the pids
-train_df = df[df[patient_id_col].isin(train_pids)]
-val_df = df[df[patient_id_col].isin(val_pids)]
-test_df = df[df[patient_id_col].isin(test_pids)]
+# Get unique patient IDs from new train, val, and test datasets
+train_pids = train_df[patient_id_col].unique()
+val_pids = val_df[patient_id_col].unique()
+test_pids = test_df[patient_id_col].unique()
 
-# assuming mDataset is predefined
+print(train_pids.shape, flush=True)
+print(val_pids.shape, flush=True)
+print(test_pids.shape, flush=True)
+
+# Create datasets
 train_ds = mDataset(train_df, df_labels)
 val_ds = mDataset(val_df, df_labels)
 test_ds = mDataset(test_df, df_labels)
@@ -127,6 +122,25 @@ y_test = [test_ds[i][1] for i in range(len(test_pids))]
 
 # Find the maximum sequence length
 max_seq_len = max(max(len(x) for x in X_train), max(len(x) for x in X_valid), max(len(x) for x in X_test))
+
+X_train_list = list(X_train)
+X_valid_list = list(X_valid)
+X_test_list = list(X_test)
+
+all_sequences = X_train_list + X_valid_list + X_test_list
+
+# Average sequence length
+average_seq_len = sum(len(x) for x in all_sequences) / len(all_sequences)
+
+# Number of '1's in the last observation of each sequence
+num_ones_last_observation = [np.sum(x[-1] == 1) for x in all_sequences]
+
+# Average number of '1's in the last observation
+average_ones_last_observation = sum(num_ones_last_observation) / len(all_sequences)
+
+print(f"Average sequence length: {average_seq_len}", flush=True)
+print(f"Average number of '1's in the last observation: {average_ones_last_observation}", flush=True)
+
 
 # Pad sequences in X_train and X_valid
 X_train_padded = [np.pad(x, ((0, max_seq_len - len(x)), (0, 0)), constant_values=np.nan) for x in X_train]
@@ -223,76 +237,36 @@ class AvgDiffOrdinalPos(Metric):
         return np.mean(self.pos_diffs) if self.pos_diffs else None
 
 ################################### LOSS ####################################
+# Filter df_labels to only include rows with patient IDs that are in train_df
+train_labels = df_labels[df_labels[patient_id_col].isin(train_pids)]
 
 # Convert labels to integer
-df_labels.iloc[:, 2:9] = df_labels.iloc[:, 2:9].astype(int)
+train_labels.iloc[:, 2:9] = train_labels.iloc[:, 2:9].astype(int)
 
 # Calculate frequencies of each label
-label_freq = df_labels.iloc[:, 2:9].sum(axis=0) / len(df_labels)
+label_freq = train_labels.iloc[:, 2:9].sum(axis=0) / len(train_labels)
 
 # Calculate inverse class frequencies
 inverse_freq = 1 / label_freq
 
 print(f"label_freq: {label_freq}", flush=True)
 
-# weights = torch.tensor(inverse_freq.values)
-# weights = torch.tensor([0, 0, 0, 0, 1, 1, 1])
+weights = torch.tensor(inverse_freq.values)
 
-# loss_func = BCEWithLogitsLossFlat(pos_weight=weights.to(device))
-
-loss_func = BCEWithLogitsLossFlat()
+if weighted_loss:
+    loss_func = BCEWithLogitsLossFlat(pos_weight=weights.to(device))
+else:
+    loss_func = BCEWithLogitsLossFlat()
 
 ################################## MODELS ###################################
 # List of models to try
 models = [
-        {
-        'model': TransformerRNNPlus,
-        'params': [
-            {
-                "nhead": 2,
-                "d_model": 32,
-                "dim_feedforward": 64,
-                "num_encoder_layers": 1,
-                "num_rnn_layers": 1,
-                "dropout": 0.05,
-                "bidirectional": True,
-            },
-        ]
-    },
-    {
-        'model': TransformerLSTMPlus,
-        'params': [
-            {
-                "nhead": 2,
-                "d_model": 32,
-                "dim_feedforward": 32,
-                "num_encoder_layers": 1,
-                "num_rnn_layers": 1,
-                "dropout": 0.05,
-                "bidirectional": True,
-            },
-        ]
-    },
-    {
-        'model': TransformerGRUPlus,
-        'params': [
-            {
-                "nhead": 2,
-                "d_model": 32,
-                "dim_feedforward": 32,
-                "num_encoder_layers": 1,
-                "num_rnn_layers": 1,
-                "dropout": 0.05,
-                "bidirectional": True,
-            },
-        ]
-    },
     {
         'model': RNNPlus,
         'params': [
             {
-                "hidden_size": 128,
-                "n_layers": 2,
+                "hidden_size": 512,
+                "n_layers": 1,
                 "bidirectional": True,
             },
         ]
@@ -301,7 +275,7 @@ models = [
         'model': LSTMPlus,
         'params': [
             {
-                "hidden_size": 128,
+                "hidden_size": 512,
                 "n_layers": 1,
                 "bidirectional": True,
             },
@@ -311,8 +285,50 @@ models = [
         'model': GRUPlus,
         'params': [
             {
-                "hidden_size": 128,
+                "hidden_size": 512,
                 "n_layers": 1,
+                "bidirectional": True,
+            },
+        ]
+    },
+    {
+        'model': TransformerRNNPlus,
+        'params': [
+            {
+                "nhead": 8,
+                "d_model": 128,
+                "dim_feedforward": 256,
+                "num_encoder_layers": 1,
+                "num_rnn_layers": 1,
+                "dropout": 0.1,
+                "bidirectional": True,
+            },
+        ]
+    },
+    {
+        'model': TransformerLSTMPlus,
+        'params': [
+            {
+                "nhead": 8,
+                "d_model": 128,
+                "dim_feedforward": 256,
+                "num_encoder_layers": 1,
+                "num_rnn_layers": 1,
+                "dropout": 0.1,
+                "bidirectional": True,
+            },
+        ]
+    },
+    {
+        'model': TransformerGRUPlus,
+        'params': [
+            {
+                "nhead": 8,
+                "d_model": 256,
+                "dim_feedforward": 512,
+                "num_encoder_layers": 1,
+                "num_rnn_layers": 1,
+                "dropout": 0.1,
                 "bidirectional": True,
             },
         ]
@@ -321,9 +337,9 @@ models = [
         'model': TransformerModel,
         'params': [
             {
-                "n_head":2,
-                "d_model": 64,
-                "d_ffn": 128,
+                "n_head": 8,
+                "d_model": 128,
+                "d_ffn": 256,
                 "n_layers": 1,
                 "activation": 'gelu',
             },
@@ -333,28 +349,15 @@ models = [
         'model': TSTPlus,
         'params': [
             {
-                "d_model": 128,
+                "d_model": 256,
                 "n_heads": 8,
-                "d_ff": 256,
-                "n_layers": 3,
+                "d_ff": 512,
+                "n_layers": 2,
                 "dropout": 0.1,
                 "act": 'gelu'
             },
         ]
     },
-    # won't work without special instatiation
-    # {
-    #     'model': PatchTST
-    #     'params': [
-    #         {
-    #             "d_model": 32,
-    #             "n_heads": 1,
-    #             "d_ff": 64,
-    #             "n_layers": 3,
-    #             "dropout": 0.1,
-    #         },
-    #     ]
-    # },
     {
         'model': RNNAttention,
         'params': [
@@ -363,7 +366,7 @@ models = [
                 "bidirectional": True,
                 "dropout": 0.1,
                 "n_heads": 8,
-                "d_ff": 512,
+                "d_ff": 256,
             },
         ]
     },
@@ -375,7 +378,7 @@ models = [
                 "bidirectional": True,
                 "dropout": 0.1,
                 "n_heads": 8,
-                "d_ff": 512,
+                "d_ff": 256,
             },
         ]
     },
@@ -461,38 +464,38 @@ for model in models:
                         # EarlyStoppingCallback(monitor='roc_auc_score', comp=np.greater, min_delta=0.0005, patience=7)],
 
         if model_class in [TransformerModel]:
-            lrs_max = 1e-3
-            max_epochs = 45
+            lrs_max = 7e-4
+            max_epochs = 35
         elif model_class in [TSTPlus]:
-            lrs_max = 1e-3
-            max_epochs = 45
+            lrs_max = 5e-4
+            max_epochs = 30
         elif model_class in [RNNAttention]:
             lrs_max = 1e-4
-            max_epochs = 50
+            max_epochs = 35
         elif model_class in [GRUAttention]:
             lrs_max = 5e-5
-            max_epochs = 50
+            max_epochs = 35
         elif model_class in [LSTMAttention]:
             lrs_max = 15e-5
-            max_epochs = 45
+            max_epochs = 25
         elif model_class in [RNNPlus]:
-            lrs_max = 3e-3
-            max_epochs = 35
+            lrs_max = 2e-4
+            max_epochs = 70
         elif model_class in [GRUPlus]:
-            lrs_max = 2e-3
-            max_epochs = 80
+            lrs_max = 1e-3
+            max_epochs = 35
         elif model_class in [LSTMPlus]:
-            lrs_max = 3e-3
-            max_epochs = 100
+            lrs_max = 7e-4
+            max_epochs = 35
         elif model_class in [TransformerRNNPlus]:
-            lrs_max = 1e-2
-            max_epochs = 500
-        elif model_class in [TransformerLSTMPlus]:
-            lrs_max = 8e-3
-            max_epochs = 500
+            lrs_max = 1e-3
+            max_epochs = 30
         elif model_class in [TransformerGRUPlus]:
-            lrs_max = 3e-3
-            max_epochs = 500
+            lrs_max = 9e-4
+            max_epochs = 35
+        elif model_class in [TransformerLSTMPlus]:
+            lrs_max = 15e-4
+            max_epochs = 45
 
         
         
@@ -512,28 +515,6 @@ for model in models:
                 return X
 
             def transform(self, X):
-                return X
-
-        class LogisticCalibrator(BaseEstimator, TransformerMixin):
-            def __init__(self):
-                self.lr = LogisticRegression()
-                
-            def fit(self, X, y):
-                X = self._reshape(X)
-                self.lr.fit(X, y)
-                return self
-
-            def transform(self, X):
-                X = self._reshape(X)
-                return self.lr.predict_proba(X)[:, 1]
-
-            def fit_transform(self, X, y):
-                self.fit(X, y)
-                return self.transform(X)
-            
-            def _reshape(self, X):
-                if len(X.shape) == 1:
-                    return X.reshape(-1, 1)
                 return X
 
         def calibrate_probs(dataloader):
@@ -764,50 +745,24 @@ for model in models:
 
         print(f"Optimal calibrated thresholds: {optimal_thresholds_cali}")
         
-        # Evaluate using valiation set
+        if flag_useTest:
+            eval_set = test_dl
+        else:
+            eval_set = dls.valid
 
-        # # Evaluate with no thresholds
-        # print("Evaluating validation set without thresholds...")
-        # evaluate(dls.valid, isotonic_models, [0.5] * len(optimal_thresholds))
-
-        # # Evaluate with calibration and thresholds
-        # print("Evaluating validation set with calibration and calibrated thresholds...")
-        # evaluate(dls.valid, isotonic_models, optimal_thresholds_cali, calibrated=True)
-
-        # # Plot calibration curve and save figure for uncalibrated and calibrated probabilities
-        # print("Plotting calibration curves...")
-        # preds, targets, probs = make_preds(dls.valid, isotonic_models, optimal_thresholds)
-        # _, _, calibrated_probs = make_preds(dls.valid, isotonic_models, optimal_thresholds_cali, calibrated=True)
-        # make_calibration_curve(probs, targets, calibrated_probs, model_class.__name__, optimal_thresholds_cali)
-
-        # # Initialize or update running sum of probabilities
-        # if prob_sums is None:
-        #     prob_sums = probs
-        # else:
-        #     prob_sums += probs
-
-        # if pred_sums is None:
-        #     pred_sums = preds
-        # else:
-        #     pred_sums += preds
-
-
-
-
-        # Evaluate using test set
 
         # Evaluate with no thresholds
         print("Evaluating test set without thresholds...")
-        evaluate(test_dl, isotonic_models, [0.5] * len(optimal_thresholds))
+        evaluate(eval_set, isotonic_models, [0.5] * len(optimal_thresholds))
 
         # Evaluate with calibration and thresholds
         print("Evaluating test set with calibration and calibrated thresholds...")
-        evaluate(test_dl, isotonic_models, optimal_thresholds_cali, calibrated=True)
+        evaluate(eval_set, isotonic_models, optimal_thresholds_cali, calibrated=True)
 
         # Plot calibration curve and save figure for uncalibrated and calibrated probabilities
         print("Plotting calibration curves...")
-        preds, targets, probs = make_preds(test_dl, isotonic_models, optimal_thresholds)
-        _, _, calibrated_probs = make_preds(test_dl, isotonic_models, optimal_thresholds_cali, calibrated=True)
+        preds, targets, probs = make_preds(eval_set, isotonic_models, optimal_thresholds)
+        _, _, calibrated_probs = make_preds(eval_set, isotonic_models, optimal_thresholds_cali, calibrated=True)
         make_calibration_curve(probs, targets, calibrated_probs, model_class.__name__, optimal_thresholds_cali)    
 
         # Initialize or update running sum of probabilities
@@ -823,6 +778,9 @@ for model in models:
 
         print("Done")
 
+        
+
+# Calculate ensemble probabilities and predictions
 
 print("Ensemble model:")
 i = 1
@@ -841,7 +799,7 @@ print(f"Optimal calibrated thresholds: {optimal_thresholds_cali}")
 
 # Calculate ensemble probabilities and predictions
 probs = prob_sums / len(models)
-_, targets = learn.get_preds(dl = test_dl)
+_, targets = learn.get_preds(dl = eval_set)
 
 # Calculate preds by dividing by len(preds) and rounding
 preds = pred_sums / len(models)
@@ -951,6 +909,8 @@ write_metrics_to_csv(metrics_list, model_class, calibrated= True)
 
 # Plot calibration curve and save figure for uncalibrated and calibrated probabilities
 print("Plotting calibration curves...")
-preds, targets, probs = make_preds(test_dl, isotonic_models, optimal_thresholds)
-_, _, calibrated_probs = make_preds(test_dl, isotonic_models, optimal_thresholds_cali, calibrated=True)
+preds, targets, probs = make_preds(eval_set, isotonic_models, optimal_thresholds)
+_, _, calibrated_probs = make_preds(eval_set, isotonic_models, optimal_thresholds_cali, calibrated=True)
 make_calibration_curve(probs, targets, calibrated_probs, model_class, optimal_thresholds_cali)    
+
+print("Done")
