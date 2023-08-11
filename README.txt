@@ -56,7 +56,13 @@ results:
     last_cmr, last_echo, last_no_locf:
         Same as base, but for the (respective) last completed .jobs batch.
     test_cmr, test_echo, test_no_locf, test_weighted:
-        test results currently (8/10) being used in the paper
+        test results currently (as of Aug 10 2023) being used in the paper
+
+RStudio:
+    .R files that I wrote to only run on RStudio. Crucially, contains rf_locf.R and rf_locf.RData, which are the script and output for the random forest.
+    Also has bar_script.R which is just hardcoded garbage to make the bar chart figure.
+    So uhh.. hopefully whoever reads this has access to the LRI RStudio servers... 
+    Also, ./unimportant isn't relevant for the project, it's just backup of some various code that I wrote and sometimes used as reference.
     
 utils:
     describe_data.R - computes descriptions of the datasets, formatted as a latex table
